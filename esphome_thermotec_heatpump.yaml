@@ -68,6 +68,10 @@ number:
   - platform: template
     name: "Target Temperature"
     id: target_temp_control
+    # Slider range spans the widest possible window (Cool 10°C–35°C, Heat/Auto
+    # 15°C–40°C). The write_target_temp script clamps to the pump's configured
+    # per-mode limits (read from the live diagnostic sensors after the first BLE
+    # poll) so the heat pump never receives an out-of-range value.
     min_value: 10
     max_value: 40
     step: 0.5
@@ -429,12 +433,20 @@ sensor:
         // Error code at offset 33 (register 0x07F2).
         // 0 = no error; 4 = E03 (water flow) confirmed via BLE capture, but see comment below on
         // error_code and error_description sensor for more details on the raw code and display mapping.
+        // Guard: only publish when the value actually changes so on_value →
+        // recompute_error_status doesn't run every 30 s during normal operation.
         int16_t err = rd(33);
-        id(error_code).publish_state(err);
+        if (!id(error_code).has_state() || (int16_t)id(error_code).state != err)
+          id(error_code).publish_state(err);
 
         ESP_LOGI("heatpump", "Outputs = 0x%04X, Error = 0x%04X", outputs, err);
       }
       return {};
+
+  # Note on delta filters below: ESPHome's delta filter passes NaN through
+  # unconditionally (the delta comparison is skipped when the new value is NaN
+  # or when the previous state was NaN). This means sensor-fault NaN publishes
+  # and subsequent recovery values both reach Home Assistant correctly.
 
   - platform: template
     id: inlet_temp
@@ -444,7 +456,7 @@ sensor:
     state_class: measurement
     accuracy_decimals: 1
     filters:
-      - delta: 0.05 
+      - delta: 0.05
 
   - platform: template
     id: outlet_temp
@@ -707,16 +719,21 @@ script:
                                    ? id(heater_mode).current_option()
                                    : std::string("Heat");
 
-            // Clamp to the heat pump's accepted range.
-            // This is hard-coded, but could read from the diagnostic sensors
-            // that output the configured range.
+            // Clamp to the heat pump's configured range, reading the live
+            // min/max diagnostic sensors (R04/R05/R09/R10 from block 0x0416).
+            // Fall back to safe hard-coded values only if the sensors haven't
+            // been populated yet (i.e. before the first successful BLE poll).
             if (mode_str == "Cool") {
-              if (temp_x10 < 100) temp_x10 = 100;   // R09 Min cool = 10°C
-              if (temp_x10 > 350) temp_x10 = 350;   // R10 Max cool = 35°C
+              int lo = id(min_cool_temp).has_state() ? (int)(id(min_cool_temp).state * 10) : 100;
+              int hi = id(max_cool_temp).has_state() ? (int)(id(max_cool_temp).state * 10) : 350;
+              if (temp_x10 < lo) temp_x10 = lo;
+              if (temp_x10 > hi) temp_x10 = hi;
             } else {
-              // Heat & Auto both use heat range
-              if (temp_x10 < 150) temp_x10 = 150;   // R04 Min heat = 15°C
-              if (temp_x10 > 400) temp_x10 = 400;   // R05 Max heat = 40°C
+              // Heat & Auto both use the heat range.
+              int lo = id(min_heat_temp).has_state() ? (int)(id(min_heat_temp).state * 10) : 150;
+              int hi = id(max_heat_temp).has_state() ? (int)(id(max_heat_temp).state * 10) : 400;
+              if (temp_x10 < lo) temp_x10 = lo;
+              if (temp_x10 > hi) temp_x10 = hi;
             }
 
             // Pick the right register based on current mode
