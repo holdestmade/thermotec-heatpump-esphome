@@ -17,20 +17,20 @@ output relays, faults and firmware info.
 
 ## Features
 
-- 🔌 **Power** on/off
-- 🌡️ **Target temperature** (mode-aware — writes to the Heat / Cool / Auto
+- **Power** on/off
+- **Target temperature** (mode-aware — writes to the Heat / Cool / Auto
   register that matches the current mode)
-- 🔁 **Mode** select: Heat / Cool / Auto
-- 🏊 **Climate entity** (`Pool Heat Pump`) tying the above together
-- 📊 **Live temperatures**: inlet water, outlet water, coil, ambient, exhaust
-- ⚙️ **Diagnostics**: heating/cooling/auto set-points, min/max limits,
+- **Mode** select: Heat / Cool / Auto
+- **Climate entity** (`Pool Heat Pump`) tying the above together
+- **Live temperatures**: inlet water, outlet water, coil, ambient, exhaust
+- **Diagnostics**: heating/cooling/auto set-points, min/max limits,
   defrost type, pump mode, mode type
-- 🟢 **Output relays**: compressor, circulating pump, high fan, 4-way valve
-- 🚨 **Fault reporting**: per-sensor P-code faults (P01/P02/P04/P05/P81),
+- **Output relays**: compressor, circulating pump, high fan, 4-way valve
+- **Fault reporting**: per-sensor P-code faults (P01/P02/P04/P05/P81),
   bitmasked E-codes (E01/E02/E03), a rolled-up **Has Error** flag and a
   human-readable **Error Description**
-- 🧩 **Firmware identity**: master program version + main control software code
-- 📶 **BLE connection** binary sensor and **Last Connected** timestamp
+- **Firmware identity**: master program version + main control software code
+- **BLE connection** binary sensor and **Last Connected** timestamp
 
 ---
 
