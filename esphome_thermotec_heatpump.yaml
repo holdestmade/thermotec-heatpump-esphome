@@ -143,6 +143,28 @@ switch:
           id: write_power_state
           power_on: false
 
+  # Releases the BLE link so the AquaTemp phone app can connect.
+  # The heat pump's BLE module accepts only ONE connection at a time, so the
+  # ESP has to let go before the app can pair.
+  #   ON  = ESP holds the link and controls the heat pump (normal operation).
+  #   OFF = ESP disconnects and stops auto-reconnecting; connect the app now.
+  # Turn it back ON (or reboot — it restores ON by default) to resume control.
+  - platform: template
+    name: "ESP BLE Link"
+    id: ble_link
+    icon: "mdi:bluetooth"
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    turn_on_action:
+      - logger.log: "BLE link ON — reconnecting ESP to heat pump"
+      - lambda: 'id(heatpump_ble).set_auto_connect(true);'
+      - ble_client.connect: heatpump_ble
+    turn_off_action:
+      - logger.log: "BLE link OFF — releasing heat pump for the AquaTemp app"
+      # Stop the tracker reconnecting the instant we drop the link.
+      - lambda: 'id(heatpump_ble).set_auto_connect(false);'
+      - ble_client.disconnect: heatpump_ble
+
 select:
   - platform: template
     name: "Mode"
