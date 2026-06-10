@@ -143,6 +143,46 @@ switch:
           id: write_power_state
           power_on: false
 
+  # Releases the BLE link so the AquaTemp phone app can connect.
+  # The heat pump's BLE module accepts only ONE connection at a time, so the
+  # ESP has to let go before the app can pair.
+  #   ON  = ESP holds the link and controls the heat pump (normal operation).
+  #   OFF = ESP disconnects and stops auto-reconnecting; connect the app now.
+  # Turn it back ON (or reboot — it restores ON by default) to resume control.
+  - platform: template
+    name: "ESP BLE Link"
+    id: ble_link
+    icon: "mdi:bluetooth"
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    turn_on_action:
+      - logger.log: "BLE link ON — reconnecting ESP to heat pump"
+      # Cancel any pending auto-timeout (manual re-enable, or it fired itself).
+      - script.stop: ble_link_timeout
+      - lambda: 'id(heatpump_ble).set_auto_connect(true);'
+      - ble_client.connect: heatpump_ble
+      # Clear the "BLE released" banner now that the ESP is back in control.
+      - homeassistant.service:
+          service: persistent_notification.dismiss
+          data:
+            notification_id: "heatpump_ble_link"
+    turn_off_action:
+      - logger.log: "BLE link OFF — releasing heat pump for the AquaTemp app"
+      # Stop the tracker reconnecting the instant we drop the link.
+      - lambda: 'id(heatpump_ble).set_auto_connect(false);'
+      - ble_client.disconnect: heatpump_ble
+      # Arm the 15-minute safety net so the ESP can't be left disconnected.
+      - script.execute: ble_link_timeout
+      - homeassistant.service:
+          service: persistent_notification.create
+          data:
+            title: "Heat pump BLE released"
+            message: >-
+              The ESP has released the BLE link so the AquaTemp app can
+              connect. It will automatically reconnect in 15 minutes — or
+              turn the "ESP BLE Link" switch back on when you're done.
+            notification_id: "heatpump_ble_link"
+
 select:
   - platform: template
     name: "Mode"
@@ -727,6 +767,18 @@ script:
                      id(coil_temp_fault).state ||
                      id(exhaust_temp_fault).state;
           id(has_error).publish_state(err);
+
+  # Safety net for the ESP BLE Link switch: 15 minutes after the link is
+  # released for the app, automatically turn it back ON so the ESP can never
+  # be left disconnected indefinitely. mode: restart re-arms the countdown if
+  # the switch is toggled OFF again; the switch's turn_on_action stops it so a
+  # manual re-enable cancels the pending timeout.
+  - id: ble_link_timeout
+    mode: restart
+    then:
+      - delay: 15min
+      - logger.log: "ESP BLE Link auto-timeout reached — re-enabling ESP control"
+      - switch.turn_on: ble_link
 
   - id: poll_heat_pump
     then:
