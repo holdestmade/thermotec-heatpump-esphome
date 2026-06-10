@@ -31,6 +31,38 @@ globals:
     initial_value: 'false'
     restore_value: no
 
+  # ── Command confirmation state ──
+  # Each writable command (power / mode / target) is sent through a
+  # send → poll → verify → retry loop. The "desired" value is what the user
+  # asked for; the "*_confirmed" flag is set true only once a poll has read
+  # the matching value back from the pump. Gating the loop on the flag (which
+  # starts false) — rather than on the optimistic entity state — guarantees the
+  # first write always fires and that confirmation is judged against the real
+  # state the pump reports, not the optimistic value HA shows immediately.
+  - id: desired_power
+    type: bool
+    initial_value: 'false'
+    restore_value: no
+  - id: power_confirmed
+    type: bool
+    initial_value: 'true'
+    restore_value: no
+  - id: desired_mode
+    type: std::string
+    restore_value: no
+  - id: mode_confirmed
+    type: bool
+    initial_value: 'true'
+    restore_value: no
+  - id: desired_target_x10
+    type: int
+    initial_value: '0'
+    restore_value: no
+  - id: target_confirmed
+    type: bool
+    initial_value: 'true'
+    restore_value: no
+
 logger:
   level: INFO
   baud_rate: 115200
@@ -84,11 +116,10 @@ number:
           level: INFO
           format: "Target set to %.1f — writing to heat pump"
           args: ['x']
+      # write_target_temp now owns the send → poll → verify → retry loop.
       - script.execute:
           id: write_target_temp
           temp_x10: !lambda 'return (int)(x * 10);'
-      - delay: 2s
-      - script.execute: poll_heat_pump
 
 switch:
   - platform: template
@@ -98,18 +129,15 @@ switch:
     optimistic: true
     turn_on_action:
       - logger.log: "Power switch ON — writing to heat pump"
+      # write_power_state now owns the send → poll → verify → retry loop.
       - script.execute:
           id: write_power_state
           power_on: true
-      - delay: 2s
-      - script.execute: poll_heat_pump
     turn_off_action:
       - logger.log: "Power switch OFF — writing to heat pump"
       - script.execute:
           id: write_power_state
           power_on: false
-      - delay: 2s
-      - script.execute: poll_heat_pump
 
 select:
   - platform: template
@@ -126,11 +154,10 @@ select:
           level: INFO
           format: "Mode set to %s — writing to heat pump"
           args: ['x.c_str()']
+      # write_mode now owns the send → poll → verify → retry loop.
       - script.execute:
           id: write_mode
           mode: !lambda 'return x;'
-      - delay: 2s
-      - script.execute: poll_heat_pump
 
 binary_sensor:
   - platform: template
@@ -706,125 +733,234 @@ script:
           value: [0x63, 0x03, 0x00, 0x07, 0x00, 0x2D, 0x3C, 0x54]
 
   - id: write_target_temp
+    # restart: a fresh target request supersedes any in-flight retry loop.
+    mode: restart
     parameters:
       temp_x10: int
     then:
-      - ble_client.ble_write:
-          id: heatpump_ble
-          service_uuid: ${service_uuid}
-          characteristic_uuid: ${write_char_uuid}
-          value: !lambda |-
-            // Resolve the active mode so we target the right register.
-            std::string mode_str = id(heater_mode).has_state()
-                                   ? id(heater_mode).current_option()
-                                   : std::string("Heat");
-
-            // Clamp to the heat pump's configured range, reading the live
-            // min/max diagnostic sensors (R04/R05/R09/R10 from block 0x0416).
-            // Fall back to safe hard-coded values only if the sensors haven't
-            // been populated yet (i.e. before the first successful BLE poll).
-            if (mode_str == "Cool") {
-              int lo = id(min_cool_temp).has_state() ? (int)(id(min_cool_temp).state * 10) : 100;
-              int hi = id(max_cool_temp).has_state() ? (int)(id(max_cool_temp).state * 10) : 350;
-              if (temp_x10 < lo) temp_x10 = lo;
-              if (temp_x10 > hi) temp_x10 = hi;
-            } else {
-              // Heat & Auto both use the heat range.
-              int lo = id(min_heat_temp).has_state() ? (int)(id(min_heat_temp).state * 10) : 150;
-              int hi = id(max_heat_temp).has_state() ? (int)(id(max_heat_temp).state * 10) : 400;
-              if (temp_x10 < lo) temp_x10 = lo;
-              if (temp_x10 > hi) temp_x10 = hi;
-            }
-
-            // Pick the right register based on current mode
-            uint8_t addr_hi = 0x04, addr_lo = 0x16;  // default: heat
-            if (mode_str == "Cool") {
-              addr_hi = 0x04; addr_lo = 0x1B;
-            } else if (mode_str == "Auto") {
-              addr_hi = 0x04; addr_lo = 0x2C;
-            }
-
-            std::vector<uint8_t> msg = {
-              0x63, 0x10, addr_hi, addr_lo, 0x00, 0x01, 0x02,
-              (uint8_t)((temp_x10 >> 8) & 0xFF),
-              (uint8_t)(temp_x10 & 0xFF)
-            };
-            uint16_t crc = 0xFFFF;
-            for (auto b : msg) {
-              crc ^= b;
-              for (int j = 0; j < 8; j++)
-                crc = (crc & 1) ? ((crc >> 1) ^ 0xA001) : (crc >> 1);
-            }
-            msg.push_back(crc & 0xFF);
-            msg.push_back((crc >> 8) & 0xFF);
-
-            ESP_LOGI("heatpump", "Set %s target = %.1f (reg 0x%02X%02X)",
-                     mode_str.c_str(), temp_x10 / 10.0, addr_hi, addr_lo);
-            return msg;
+      # 1) Clamp the requested value once and stash the desired (clamped) value.
+      #    Confirmation later compares the pump's read-back against this.
+      - lambda: |-
+          std::string mode_str = id(heater_mode).has_state()
+                                 ? id(heater_mode).current_option()
+                                 : std::string("Heat");
+          // Clamp to the heat pump's configured range, reading the live
+          // min/max diagnostic sensors (R04/R05/R09/R10 from block 0x0416).
+          // Fall back to safe hard-coded values only if the sensors haven't
+          // been populated yet (i.e. before the first successful BLE poll).
+          if (mode_str == "Cool") {
+            int lo = id(min_cool_temp).has_state() ? (int)(id(min_cool_temp).state * 10) : 100;
+            int hi = id(max_cool_temp).has_state() ? (int)(id(max_cool_temp).state * 10) : 350;
+            if (temp_x10 < lo) temp_x10 = lo;
+            if (temp_x10 > hi) temp_x10 = hi;
+          } else {
+            // Heat & Auto both use the heat range.
+            int lo = id(min_heat_temp).has_state() ? (int)(id(min_heat_temp).state * 10) : 150;
+            int hi = id(max_heat_temp).has_state() ? (int)(id(max_heat_temp).state * 10) : 400;
+            if (temp_x10 < lo) temp_x10 = lo;
+            if (temp_x10 > hi) temp_x10 = hi;
+          }
+          id(desired_target_x10) = temp_x10;
+          id(target_confirmed) = false;
+      # 2) Send → poll → verify, retrying up to 4 times. Once confirmed (or
+      #    BLE drops) the remaining iterations no-op via the guard condition.
+      - repeat:
+          count: 4
+          then:
+            - if:
+                condition:
+                  lambda: 'return id(ble_connected) && !id(target_confirmed);'
+                then:
+                  - ble_client.ble_write:
+                      id: heatpump_ble
+                      service_uuid: ${service_uuid}
+                      characteristic_uuid: ${write_char_uuid}
+                      value: !lambda |-
+                        int temp_x10 = id(desired_target_x10);
+                        std::string mode_str = id(heater_mode).has_state()
+                                               ? id(heater_mode).current_option()
+                                               : std::string("Heat");
+                        // Pick the right register based on current mode
+                        uint8_t addr_hi = 0x04, addr_lo = 0x16;  // default: heat
+                        if (mode_str == "Cool") {
+                          addr_hi = 0x04; addr_lo = 0x1B;
+                        } else if (mode_str == "Auto") {
+                          addr_hi = 0x04; addr_lo = 0x2C;
+                        }
+                        std::vector<uint8_t> msg = {
+                          0x63, 0x10, addr_hi, addr_lo, 0x00, 0x01, 0x02,
+                          (uint8_t)((temp_x10 >> 8) & 0xFF),
+                          (uint8_t)(temp_x10 & 0xFF)
+                        };
+                        uint16_t crc = 0xFFFF;
+                        for (auto b : msg) {
+                          crc ^= b;
+                          for (int j = 0; j < 8; j++)
+                            crc = (crc & 1) ? ((crc >> 1) ^ 0xA001) : (crc >> 1);
+                        }
+                        msg.push_back(crc & 0xFF);
+                        msg.push_back((crc >> 8) & 0xFF);
+                        ESP_LOGI("heatpump", "Set %s target = %.1f (reg 0x%02X%02X)",
+                                 mode_str.c_str(), temp_x10 / 10.0, addr_hi, addr_lo);
+                        return msg;
+                  - delay: 2s
+                  - script.execute: poll_heat_pump
+                  - delay: 2s
+                  # Read-back published into target_temp_control by the notify
+                  # parser (block 0x0416). Confirm within 0.1°C.
+                  - lambda: |-
+                      bool ok = id(target_temp_control).has_state() &&
+                                abs((int)lroundf(id(target_temp_control).state * 10.0f)
+                                    - id(desired_target_x10)) <= 1;
+                      id(target_confirmed) = ok;
+                      if (ok) {
+                        ESP_LOGI("heatpump", "Target confirmed at %.1f",
+                                 id(desired_target_x10) / 10.0);
+                      } else {
+                        ESP_LOGW("heatpump", "Target not yet confirmed (want %.1f) — retrying",
+                                 id(desired_target_x10) / 10.0);
+                      }
+      - if:
+          condition:
+            lambda: 'return !id(target_confirmed);'
+          then:
+            - logger.log:
+                level: WARN
+                format: "Target write gave up unconfirmed after 4 attempts (want %.1f)"
+                args: ['id(desired_target_x10) / 10.0']
 
   - id: write_power_state
+    # restart: a fresh power request supersedes any in-flight retry loop.
+    mode: restart
     parameters:
       power_on: bool
     then:
-      - ble_client.ble_write:
-          id: heatpump_ble
-          service_uuid: ${service_uuid}
-          characteristic_uuid: ${write_char_uuid}
-          value: !lambda |-
-            uint8_t val = power_on ? 0x01 : 0x00;
-            std::vector<uint8_t> msg = {
-              0x63, 0x10, 0x03, 0xF3, 0x00, 0x01, 0x02, 0x00, val
-            };
-            // CRC16 (Modbus RTU)
-            uint16_t crc = 0xFFFF;
-            for (auto b : msg) {
-              crc ^= b;
-              for (int j = 0; j < 8; j++)
-                crc = (crc & 1) ? ((crc >> 1) ^ 0xA001) : (crc >> 1);
-            }
-            msg.push_back(crc & 0xFF);
-            msg.push_back((crc >> 8) & 0xFF);
-            ESP_LOGI("heatpump", "Set power = %s", power_on ? "ON" : "OFF");
-            return msg;
+      - lambda: |-
+          id(desired_power) = power_on;
+          id(power_confirmed) = false;
+      - repeat:
+          count: 4
+          then:
+            - if:
+                condition:
+                  lambda: 'return id(ble_connected) && !id(power_confirmed);'
+                then:
+                  - ble_client.ble_write:
+                      id: heatpump_ble
+                      service_uuid: ${service_uuid}
+                      characteristic_uuid: ${write_char_uuid}
+                      value: !lambda |-
+                        uint8_t val = id(desired_power) ? 0x01 : 0x00;
+                        std::vector<uint8_t> msg = {
+                          0x63, 0x10, 0x03, 0xF3, 0x00, 0x01, 0x02, 0x00, val
+                        };
+                        // CRC16 (Modbus RTU)
+                        uint16_t crc = 0xFFFF;
+                        for (auto b : msg) {
+                          crc ^= b;
+                          for (int j = 0; j < 8; j++)
+                            crc = (crc & 1) ? ((crc >> 1) ^ 0xA001) : (crc >> 1);
+                        }
+                        msg.push_back(crc & 0xFF);
+                        msg.push_back((crc >> 8) & 0xFF);
+                        ESP_LOGI("heatpump", "Set power = %s", id(desired_power) ? "ON" : "OFF");
+                        return msg;
+                  - delay: 2s
+                  - script.execute: poll_heat_pump
+                  - delay: 2s
+                  # Read-back published into heater_power by the notify parser
+                  # (block 0x03E9 reg 0x03F3).
+                  - lambda: |-
+                      bool ok = (id(heater_power).state == id(desired_power));
+                      id(power_confirmed) = ok;
+                      if (ok) {
+                        ESP_LOGI("heatpump", "Power confirmed %s", id(desired_power) ? "ON" : "OFF");
+                      } else {
+                        ESP_LOGW("heatpump", "Power not yet confirmed (want %s) — retrying",
+                                 id(desired_power) ? "ON" : "OFF");
+                      }
+      - if:
+          condition:
+            lambda: 'return !id(power_confirmed);'
+          then:
+            - logger.log:
+                level: WARN
+                format: "Power write gave up unconfirmed after 4 attempts (want %s)"
+                args: ['id(desired_power) ? "ON" : "OFF"']
 
   - id: write_mode
+    # restart: a fresh mode request supersedes any in-flight retry loop.
+    mode: restart
     parameters:
       mode: string
     then:
-      - ble_client.ble_write:
-          id: heatpump_ble
-          service_uuid: ${service_uuid}
-          characteristic_uuid: ${write_char_uuid}
-          value: !lambda |-
-            // Translate string mode to (mode_val, second_reg) pair.
-            // The second register's exact meaning is unknown but the values
-            // below match what the official AquaTemp app sends.
-            uint8_t mode_lo, sec_hi, sec_lo;
-            if (mode == "Cool") {
-              mode_lo = 0x01; sec_hi = 0x00; sec_lo = 0x88;
-            } else if (mode == "Auto") {
-              mode_lo = 0x02; sec_hi = 0x00; sec_lo = 0x8C;
-            } else {
-              // Default to Heat (mode 0) — also covers any unrecognised string
-              mode_lo = 0x00; sec_hi = 0x00; sec_lo = 0x00;
-            }
-
-            std::vector<uint8_t> msg = {
-              0x63, 0x10, 0x03, 0xF4, 0x00, 0x02, 0x04,
-              0x00, mode_lo,
-              sec_hi, sec_lo
-            };
-            // CRC16 (Modbus RTU)
-            uint16_t crc = 0xFFFF;
-            for (auto b : msg) {
-              crc ^= b;
-              for (int j = 0; j < 8; j++)
-                crc = (crc & 1) ? ((crc >> 1) ^ 0xA001) : (crc >> 1);
-            }
-            msg.push_back(crc & 0xFF);
-            msg.push_back((crc >> 8) & 0xFF);
-            ESP_LOGI("heatpump", "Set mode = %s", mode.c_str());
-            return msg;
+      - lambda: |-
+          id(desired_mode) = mode;
+          id(mode_confirmed) = false;
+      - repeat:
+          count: 4
+          then:
+            - if:
+                condition:
+                  lambda: 'return id(ble_connected) && !id(mode_confirmed);'
+                then:
+                  - ble_client.ble_write:
+                      id: heatpump_ble
+                      service_uuid: ${service_uuid}
+                      characteristic_uuid: ${write_char_uuid}
+                      value: !lambda |-
+                        // Translate string mode to (mode_val, second_reg) pair.
+                        // The second register's exact meaning is unknown but the
+                        // values below match what the official AquaTemp app sends.
+                        std::string mode = id(desired_mode);
+                        uint8_t mode_lo, sec_hi, sec_lo;
+                        if (mode == "Cool") {
+                          mode_lo = 0x01; sec_hi = 0x00; sec_lo = 0x88;
+                        } else if (mode == "Auto") {
+                          mode_lo = 0x02; sec_hi = 0x00; sec_lo = 0x8C;
+                        } else {
+                          // Default to Heat (mode 0) — also covers any unrecognised string
+                          mode_lo = 0x00; sec_hi = 0x00; sec_lo = 0x00;
+                        }
+                        std::vector<uint8_t> msg = {
+                          0x63, 0x10, 0x03, 0xF4, 0x00, 0x02, 0x04,
+                          0x00, mode_lo,
+                          sec_hi, sec_lo
+                        };
+                        // CRC16 (Modbus RTU)
+                        uint16_t crc = 0xFFFF;
+                        for (auto b : msg) {
+                          crc ^= b;
+                          for (int j = 0; j < 8; j++)
+                            crc = (crc & 1) ? ((crc >> 1) ^ 0xA001) : (crc >> 1);
+                        }
+                        msg.push_back(crc & 0xFF);
+                        msg.push_back((crc >> 8) & 0xFF);
+                        ESP_LOGI("heatpump", "Set mode = %s", mode.c_str());
+                        return msg;
+                  - delay: 2s
+                  - script.execute: poll_heat_pump
+                  - delay: 2s
+                  # Read-back published into heater_mode by the notify parser
+                  # (block 0x03E9 reg 0x03F4).
+                  - lambda: |-
+                      bool ok = id(heater_mode).has_state() &&
+                                id(heater_mode).current_option() == id(desired_mode);
+                      id(mode_confirmed) = ok;
+                      if (ok) {
+                        ESP_LOGI("heatpump", "Mode confirmed %s", id(desired_mode).c_str());
+                      } else {
+                        ESP_LOGW("heatpump", "Mode not yet confirmed (want %s) — retrying",
+                                 id(desired_mode).c_str());
+                      }
+      - if:
+          condition:
+            lambda: 'return !id(mode_confirmed);'
+          then:
+            - logger.log:
+                level: WARN
+                format: "Mode write gave up unconfirmed after 4 attempts (want %s)"
+                args: ['id(desired_mode).c_str()']
 
 interval:
   - interval: 30s
