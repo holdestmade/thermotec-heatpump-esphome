@@ -91,6 +91,10 @@ ble_client:
         - delay: 3s
         - script.execute: poll_heat_pump
         - component.update: last_connected
+        # Let the poll's notify responses arrive and refresh the real state,
+        # then re-assert any command that was issued/dropped during the outage.
+        - delay: 3s
+        - script.execute: reassert_pending
     on_disconnect:
       then:
         - logger.log: "Heat pump disconnected"
@@ -731,6 +735,39 @@ script:
           service_uuid: ${service_uuid}
           characteristic_uuid: ${write_char_uuid}
           value: [0x63, 0x03, 0x00, 0x07, 0x00, 0x2D, 0x3C, 0x54]
+
+  # Re-assert any command that never got confirmed (issued or dropped while
+  # BLE was down). Gated on the *_confirmed flags — a command that DID confirm
+  # leaves its flag true, so we never override a change made at the physical
+  # panel during the outage; the reconnect poll already picked that up.
+  # Each write_* script runs its own poll → verify → retry loop, so this only
+  # kicks off the re-send; confirmation/giving-up is handled there.
+  - id: reassert_pending
+    then:
+      - if:
+          condition:
+            lambda: 'return !id(power_confirmed);'
+          then:
+            - logger.log: "Reconnect: re-asserting pending Power command"
+            - script.execute:
+                id: write_power_state
+                power_on: !lambda 'return id(desired_power);'
+      - if:
+          condition:
+            lambda: 'return !id(mode_confirmed) && !id(desired_mode).empty();'
+          then:
+            - logger.log: "Reconnect: re-asserting pending Mode command"
+            - script.execute:
+                id: write_mode
+                mode: !lambda 'return id(desired_mode);'
+      - if:
+          condition:
+            lambda: 'return !id(target_confirmed);'
+          then:
+            - logger.log: "Reconnect: re-asserting pending Target command"
+            - script.execute:
+                id: write_target_temp
+                temp_x10: !lambda 'return id(desired_target_x10);'
 
   - id: write_target_temp
     # restart: a fresh target request supersedes any in-flight retry loop.
