@@ -50,6 +50,19 @@ output relays, faults and firmware info.
 - Writes (power, mode, target temperature) are built as Modbus
   `0x10` *Write Multiple Registers* frames with a computed CRC-16, then sent
   to the write characteristic.
+- **Confirmed writes / auto-retry.** BLE writes are occasionally dropped, so
+  each command runs a *send → poll → verify → retry* loop (up to 4 attempts).
+  After sending, it polls and compares the value the pump reports back against
+  what was requested; if they don't match it re-sends. The loop stops the
+  moment the pump confirms the change, and logs a `WARN` if it gives up
+  unconfirmed. This is why a command that previously needed 2–3 manual tries
+  now "takes" on its own.
+- **Re-assert on reconnect.** If a command is issued (or dropped) while BLE is
+  down, it's replayed automatically once the link comes back. On reconnect the
+  ESP32 polls for the real state, then re-sends only the commands whose
+  confirmation is still outstanding. A command that *did* confirm is never
+  replayed, so a change made at the physical panel during the outage is
+  respected rather than overridden.
 
 ⚠️ **Only one BLE client can be connected at a time.** While the ESP32 is
 connected, the AquaTemp phone app cannot connect, and vice-versa.
