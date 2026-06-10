@@ -813,7 +813,7 @@ script:
                       service_uuid: ${service_uuid}
                       characteristic_uuid: ${write_char_uuid}
                       value: !lambda |-
-                        int temp_x10 = id(desired_target_x10);
+                        int tx10 = id(desired_target_x10);
                         std::string mode_str = id(heater_mode).has_state()
                                                ? id(heater_mode).current_option()
                                                : std::string("Heat");
@@ -826,8 +826,8 @@ script:
                         }
                         std::vector<uint8_t> msg = {
                           0x63, 0x10, addr_hi, addr_lo, 0x00, 0x01, 0x02,
-                          (uint8_t)((temp_x10 >> 8) & 0xFF),
-                          (uint8_t)(temp_x10 & 0xFF)
+                          (uint8_t)((tx10 >> 8) & 0xFF),
+                          (uint8_t)(tx10 & 0xFF)
                         };
                         uint16_t crc = 0xFFFF;
                         for (auto b : msg) {
@@ -838,7 +838,7 @@ script:
                         msg.push_back(crc & 0xFF);
                         msg.push_back((crc >> 8) & 0xFF);
                         ESP_LOGI("heatpump", "Set %s target = %.1f (reg 0x%02X%02X)",
-                                 mode_str.c_str(), temp_x10 / 10.0, addr_hi, addr_lo);
+                                 mode_str.c_str(), tx10 / 10.0, addr_hi, addr_lo);
                         return msg;
                   - delay: 2s
                   - script.execute: poll_heat_pump
@@ -949,11 +949,11 @@ script:
                         // Translate string mode to (mode_val, second_reg) pair.
                         // The second register's exact meaning is unknown but the
                         // values below match what the official AquaTemp app sends.
-                        std::string mode = id(desired_mode);
+                        std::string m = id(desired_mode);
                         uint8_t mode_lo, sec_hi, sec_lo;
-                        if (mode == "Cool") {
+                        if (m == "Cool") {
                           mode_lo = 0x01; sec_hi = 0x00; sec_lo = 0x88;
-                        } else if (mode == "Auto") {
+                        } else if (m == "Auto") {
                           mode_lo = 0x02; sec_hi = 0x00; sec_lo = 0x8C;
                         } else {
                           // Default to Heat (mode 0) — also covers any unrecognised string
@@ -973,7 +973,7 @@ script:
                         }
                         msg.push_back(crc & 0xFF);
                         msg.push_back((crc >> 8) & 0xFF);
-                        ESP_LOGI("heatpump", "Set mode = %s", mode.c_str());
+                        ESP_LOGI("heatpump", "Set mode = %s", m.c_str());
                         return msg;
                   - delay: 2s
                   - script.execute: poll_heat_pump
