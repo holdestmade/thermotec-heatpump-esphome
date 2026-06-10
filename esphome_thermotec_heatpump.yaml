@@ -384,12 +384,12 @@ sensor:
         }
 
         // Mode at offset 11 (register 0x03F4)
-        // 0 = Heat, 1 = Cool, 2 = Auto
+        // 0 = Cool, 1 = Heat, 2 = Auto
         int16_t mode = rd(11);
         const char *mode_str;
         switch (mode) {
-          case 0:  mode_str = "Heat"; break;
-          case 1:  mode_str = "Cool"; break;
+          case 0:  mode_str = "Cool"; break;
+          case 1:  mode_str = "Heat"; break;
           case 2:  mode_str = "Auto"; break;
           default: mode_str = "Unknown"; break;
         }
@@ -952,12 +952,12 @@ script:
                         std::string m = id(desired_mode);
                         uint8_t mode_lo, sec_hi, sec_lo;
                         if (m == "Cool") {
-                          mode_lo = 0x01; sec_hi = 0x00; sec_lo = 0x88;
+                          mode_lo = 0x00; sec_hi = 0x00; sec_lo = 0x00;
                         } else if (m == "Auto") {
                           mode_lo = 0x02; sec_hi = 0x00; sec_lo = 0x8C;
                         } else {
-                          // Default to Heat (mode 0) — also covers any unrecognised string
-                          mode_lo = 0x00; sec_hi = 0x00; sec_lo = 0x00;
+                          // Default to Heat (mode 1) — also covers any unrecognised string
+                          mode_lo = 0x01; sec_hi = 0x00; sec_lo = 0x88;
                         }
                         std::vector<uint8_t> msg = {
                           0x63, 0x10, 0x03, 0xF4, 0x00, 0x02, 0x04,
