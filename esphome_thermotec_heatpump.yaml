@@ -156,11 +156,14 @@ switch:
     optimistic: true
     restore_mode: RESTORE_DEFAULT_ON
     turn_on_action:
-      - logger.log: "BLE link ON — reconnecting ESP to heat pump"
+      - logger.log: "BLE link ON — re-enabling auto-connect to heat pump"
       # Cancel any pending auto-timeout (manual re-enable, or it fired itself).
       - script.stop: ble_link_timeout
+      # Re-enable auto-connect and let the esp32_ble_tracker reconnect on its
+      # next scan. Do NOT call ble_client.connect here: with auto_connect the
+      # tracker is already initiating the connection, and a second explicit
+      # connect races it and jams the GATT client in CONNECTING.
       - lambda: 'id(heatpump_ble).set_auto_connect(true);'
-      - ble_client.connect: heatpump_ble
       # Clear the "BLE released" banner now that the ESP is back in control.
       - homeassistant.service:
           service: persistent_notification.dismiss
