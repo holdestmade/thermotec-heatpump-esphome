@@ -146,6 +146,7 @@ this repo:
 | `Mode` | select | Heat / Cool / Auto |
 | `Target Temperature` | number | 10–40 °C slider; clamped to the pump's per-mode limits on write |
 | `Pool Heat Pump` | climate | Combines the above (requires the `pool_heatpump_climate` component) |
+| `ESP BLE Link` | switch | Turn **OFF** to release BLE so the AquaTemp phone app can connect (the pump accepts only one connection at a time); turn back **ON** to resume ESP control. Auto re-enables after 15 min. |
 
 ### Temperatures
 `Inlet Water`, `Outlet Water`, `Coil`, `Ambient`, `Exhaust` — published as
