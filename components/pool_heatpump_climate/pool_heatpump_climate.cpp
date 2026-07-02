@@ -102,6 +102,15 @@ void PoolHeatpumpClimate::setup() {
   this->publish_state();
 }
 
+void PoolHeatpumpClimate::dump_config() {
+  LOG_CLIMATE("", "Pool Heatpump Climate", this);
+  // The optional inputs decide which action-derivation path runs, so log
+  // what's actually wired at boot.
+  ESP_LOGCONFIG(TAG, "  State sensor: %s", YESNO(this->state_sensor_ != nullptr));
+  ESP_LOGCONFIG(TAG, "  Compressor sensor: %s", YESNO(this->compressor_sensor_ != nullptr));
+  ESP_LOGCONFIG(TAG, "  Fan sensor: %s", YESNO(this->fan_sensor_ != nullptr));
+}
+
 climate::ClimateTraits PoolHeatpumpClimate::traits() {
   auto traits = climate::ClimateTraits();
   // Modern feature-flag API (ESPHome 2025.11+). The old set_supports_* accessors
