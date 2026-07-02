@@ -33,6 +33,7 @@ class PoolHeatpumpClimate : public Component, public climate::Climate {
   void set_fan_sensor(binary_sensor::BinarySensor *s) { fan_sensor_ = s; }
 
   void setup() override;
+  void dump_config() override;
   void control(const climate::ClimateCall &call) override;
   climate::ClimateTraits traits() override;
 

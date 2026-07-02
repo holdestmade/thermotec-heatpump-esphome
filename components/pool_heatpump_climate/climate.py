@@ -20,7 +20,18 @@ PoolHeatpumpClimate = pool_heatpump_ns.class_(
     "PoolHeatpumpClimate", climate.Climate, cg.Component
 )
 
-CONFIG_SCHEMA = (
+def _validate_action_inputs(config):
+    # The hardware-state action path in update_action_() is only entered when
+    # a compressor sensor is wired; a fan sensor on its own would be silently
+    # ignored, so reject that combination at validation time.
+    if CONF_FAN_SENSOR in config and CONF_COMPRESSOR_SENSOR not in config:
+        raise cv.Invalid(
+            f"'{CONF_FAN_SENSOR}' requires '{CONF_COMPRESSOR_SENSOR}' to be set as well"
+        )
+    return config
+
+
+CONFIG_SCHEMA = cv.All(
     climate.climate_schema(PoolHeatpumpClimate)
     .extend(
         {
@@ -34,7 +45,8 @@ CONFIG_SCHEMA = (
             cv.Optional(CONF_FAN_SENSOR): cv.use_id(binary_sensor.BinarySensor),
         }
     )
-    .extend(cv.COMPONENT_SCHEMA)
+    .extend(cv.COMPONENT_SCHEMA),
+    _validate_action_inputs,
 )
 
 

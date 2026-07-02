@@ -53,10 +53,14 @@ output relays, faults and firmware info.
 - **Confirmed writes / auto-retry.** BLE writes are occasionally dropped, so
   each command runs a *send → poll → verify → retry* loop (up to 4 attempts).
   After sending, it polls and compares the value the pump reports back against
-  what was requested; if they don't match it re-sends. The loop stops the
-  moment the pump confirms the change, and logs a `WARN` if it gives up
-  unconfirmed. This is why a command that previously needed 2–3 manual tries
-  now "takes" on its own.
+  what was requested; if they don't match it re-sends. A confirmation only
+  counts once a fresh poll response has actually been parsed — a lost response
+  can't be mistaken for success just because the HA entity already shows the
+  optimistic value. Concurrent commands (e.g. mode + power from the climate
+  entity) are serialized so their frames and polls never interleave. The loop
+  stops the moment the pump confirms the change, and logs a `WARN` if it gives
+  up unconfirmed. This is why a command that previously needed 2–3 manual
+  tries now "takes" on its own.
 - **Re-assert on reconnect.** If a command is issued (or dropped) while BLE is
   down, it's replayed automatically once the link comes back. On reconnect the
   ESP32 polls for the real state, then re-sends only the commands whose
